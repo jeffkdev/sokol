@@ -138,6 +138,8 @@
     MSAA                | YES     | YES   | YES   | YES   | YES     | TODO | TODO  | YES
     drag'n'drop         | YES     | YES   | YES   | ---   | ---     | TODO | TODO  | YES
     window icon         | YES     | YES(1)| YES   | ---   | ---     | TODO | TODO  | YES
+    cursor icon         | YES     | TODO  | TODO  | ---   | ---     | ???  | ???   | ???
+
 
     (1) macOS has no regular window icons, instead the dock icon is changed
 
@@ -1295,17 +1297,19 @@ typedef struct sapp_range {
 /*
     sapp_image_desc
 
-    This is used to describe image data to sokol_app.h (at first, window
-    icons, later maybe cursor images).
+    This is used to describe image data to sokol_app.h 
+      window icons and cursors).
 
     Note that the actual image pixel format depends on the use case:
 
     - window icon pixels are RGBA8
-    - cursor images are ??? (FIXME)
+    - cursor images are RGBA
 */
 typedef struct sapp_image_desc {
     int width;
     int height;
+    int x_hot;
+    int y_hot;
     sapp_range pixels;
 } sapp_image_desc;
 
@@ -1332,6 +1336,12 @@ typedef struct sapp_icon_desc {
     sapp_image_desc images[SAPP_MAX_ICONIMAGES];
 } sapp_icon_desc;
 
+/* sapp_cursor handle (created with sapp_make_cursor()) 
+    TODO: Actual handle instead of void*
+*/
+typedef struct sapp_cursor {
+     const void* id; 
+} sapp_cursor;
 
 typedef struct sapp_desc {
     void (*init_cb)(void);                  // these are the user-provided callbacks without user data
@@ -1466,6 +1476,12 @@ SOKOL_APP_API_DECL const char* sapp_get_clipboard_string(void);
 SOKOL_APP_API_DECL void sapp_set_window_title(const char* str);
 /* set the window icon (only on Windows and Linux) */
 SOKOL_APP_API_DECL void sapp_set_icon(const sapp_icon_desc* icon_desc);
+/* create a cursor resrouce */
+SOKOL_APP_API_DECL sapp_cursor sapp_make_cursor(const sapp_image_desc* image_desc);
+/* set the cursor resrouce */
+SOKOL_APP_API_DECL void sapp_set_cursor(sapp_cursor cursor);
+/* destroy a cursor resrouce */
+SOKOL_APP_API_DECL void sapp_destroy_cursor(sapp_cursor cursor);
 /* gets the total number of dropped files (after an SAPP_EVENTTYPE_FILES_DROPPED event) */
 SOKOL_APP_API_DECL int sapp_get_num_dropped_files(void);
 /* gets the dropped file paths */
@@ -6850,7 +6866,7 @@ _SOKOL_PRIVATE void _sapp_win32_update_window_title(void) {
     SetWindowTextW(_sapp.win32.hwnd, _sapp.window_title_wide);
 }
 
-_SOKOL_PRIVATE HICON _sapp_win32_create_icon_from_image(const sapp_image_desc* desc) {
+_SOKOL_PRIVATE HICON _sapp_win32_create_icon_from_image(const sapp_image_desc* desc, bool icon) {
     BITMAPV5HEADER bi;
     memset(&bi, 0, sizeof(bi));
     bi.bV5Size = sizeof(bi);
@@ -6892,9 +6908,9 @@ _SOKOL_PRIVATE HICON _sapp_win32_create_icon_from_image(const sapp_image_desc* d
 
     ICONINFO icon_info;
     memset(&icon_info, 0, sizeof(icon_info));
-    icon_info.fIcon = true;
-    icon_info.xHotspot = 0;
-    icon_info.yHotspot = 0;
+    icon_info.fIcon = icon;
+    icon_info.xHotspot = desc->x_hot;
+    icon_info.yHotspot = desc->y_hot;
     icon_info.hbmMask = mask;
     icon_info.hbmColor = color;
     HICON icon_handle = CreateIconIndirect(&icon_info);
@@ -6909,9 +6925,9 @@ _SOKOL_PRIVATE void _sapp_win32_set_icon(const sapp_icon_desc* icon_desc, int nu
 
     int big_img_index = _sapp_image_bestmatch(icon_desc->images, num_images, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
     int sml_img_index = _sapp_image_bestmatch(icon_desc->images, num_images, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
-    HICON big_icon = _sapp_win32_create_icon_from_image(&icon_desc->images[big_img_index]);
-    HICON sml_icon = _sapp_win32_create_icon_from_image(&icon_desc->images[sml_img_index]);
-
+    HICON big_icon = _sapp_win32_create_icon_from_image(&icon_desc->images[big_img_index], false);
+    HICON sml_icon = _sapp_win32_create_icon_from_image(&icon_desc->images[sml_img_index], false);
+    
     // if icon creation or lookup has failed for some reason, leave the currently set icon untouched
     if (0 != big_icon) {
         SendMessage(_sapp.win32.hwnd, WM_SETICON, ICON_BIG, (LPARAM) big_icon);
@@ -6927,6 +6943,18 @@ _SOKOL_PRIVATE void _sapp_win32_set_icon(const sapp_icon_desc* icon_desc, int nu
         }
         _sapp.win32.small_icon = sml_icon;
     }
+}
+
+_SOKOL_PRIVATE sapp_cursor _sapp_win32_make_cursor(const sapp_image_desc* desc) {
+    return (sapp_cursor){.id = (void*) _sapp_win32_create_icon_from_image(desc, false)};
+}
+
+_SOKOL_PRIVATE void _sapp_win32_set_cursor(sapp_cursor cursor) {
+    SetCursor((HCURSOR) cursor.id);
+}
+
+_SOKOL_PRIVATE void _sapp_win32_destroy_cursor(sapp_cursor cursor) {
+    DestroyIcon((HICON) cursor.id);
 }
 
 /* don't laugh, but this seems to be the easiest and most robust
@@ -11205,6 +11233,39 @@ SOKOL_API_IMPL void sapp_set_icon(const sapp_icon_desc* desc) {
         _sapp_x11_set_icon(desc, num_images);
     #elif defined(_SAPP_EMSCRIPTEN)
         _sapp_emsc_set_icon(desc, num_images);
+    #endif
+}
+
+SOKOL_API_IMPL sapp_cursor sapp_make_cursor(const sapp_image_desc* desc) {
+    #if defined(_SAPP_MACOS)
+        /* not implemented */
+        return (sapp_cursor){.id = 0};
+    #elif defined(_SAPP_WIN32)
+         return _sapp_win32_make_cursor(desc);
+    #elif defined(_SAPP_LINUX)
+        /* not implemented */
+        return (sapp_cursor){.id = 0};
+    #endif
+}
+
+SOKOL_API_IMPL void sapp_set_cursor(sapp_cursor cursor) {
+    #if defined(_SAPP_MACOS)
+        /* not implemented */
+    #elif defined(_SAPP_WIN32)
+         _sapp_win32_set_cursor(cursor);
+    #elif defined(_SAPP_LINUX)
+        /* not implemented */
+    #endif
+}
+
+SOKOL_API_IMPL void sapp_destroy_cursor(sapp_cursor cursor) {
+    SOKOL_ASSERT(cursor.id);
+    #if defined(_SAPP_MACOS)
+        /* not implemented */
+    #elif defined(_SAPP_WIN32)
+         _sapp_win32_destroy_cursor(cursor);
+    #elif defined(_SAPP_LINUX)
+        /* not implemented */
     #endif
 }
 
