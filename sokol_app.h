@@ -1303,7 +1303,7 @@ typedef struct sapp_range {
     Note that the actual image pixel format depends on the use case:
 
     - window icon pixels are RGBA8
-    - cursor images are RGBA
+    - cursor images are RGBA8
 */
 typedef struct sapp_image_desc {
     int width;
