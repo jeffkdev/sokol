@@ -1,11 +1,95 @@
 ## Updates
 
-- **15-Jan-2022**: 
+- **28-Jan-2022**: some window size behaviour changes in sokol_app.h.
+  - Asking for a default-sized window (via sapp_desc.width/height = 0) now
+    behaves a bit differently on desktop platforms. Previously this set the
+    window size to 640x480, now a default window covers more screen area:
+      - on Windows CW_USEDEFAULT will be used for the size
+      - on macOS and Linux, the window size will be 4/5 of the
+        display size
+      - no behaviour changes on other platforms
+  - On Windows and Linux, the window is now centered (in a later update,
+    more control over the initial window position, and new functions for
+    positioning and sizing might be provided)
+  - On Windows, when toggling between windowed and fullscreen, the
+    window position and size will now be restored (on other platforms
+    this already happened automatically through the window system)
+  - On all desktop platforms if an application starts in fullscreen and
+    then is toggled back to windowed, the window will now be of the
+    expected size (provided in sapp_desc.width/height)
+
+- **20-Jan-2022**:
+  - sokol_audio.h: A compatibility fix in the sokol_audio.h WASAPI backend (Windows): On
+    some configs the IAudioClient::Initialize() call could fail because
+    of a mismatch between the requested number of channels and speaker config.
+    See [#614](https://github.com/floooh/sokol/issues/614) for details.
+  - sokol_app.h D3D11/DXGI: Fix an (uncritical) COM interface leak warning for IDXGIAdapter and
+    IDXGIFactory at shutdown, introduced with the recent disabling of Alt-Enter.
+
+- **18-Jan-2022**:
+  - sokol_app.h now has per-monitor DPI support on Windows and macOS: when
+    the application window is moved to a monitor with different DPI, the values
+    returned by sapp_dpi_scale(), sapp_width() and sapp_height() will update
+    accordingly (only if the application requested high-dpi rendering with
+    ```sapp_desc.high_dpi=true```, otherwise the dpi scale value remains
+    fixed at 1.0f). The application will receive an SAPP_EVENTTYPE_RESIZED event
+    if the default framebuffer size has changed because of a DPI change.
+    On Windows this feature requires Win10 version 1703 or later (aka the
+    'Creators Update'), older Windows version simply behave as before.
+    Many thank to @tjachmann for the initial PR with the Windows implementation!
+  - sokol_app.h: DPI scale computation on macOS is now more robust using the
+    NSScreen.backingScaleFactor value
+  - sokol_app.h: the new frame timing code in sokol_app.h now detects if the display
+    refresh rate changes and adjusts itself accordingly (for instance if the
+    window is moved between displays with different refresh rate)
+  - sokol_app.h D3D11/DXGI: during window movement and resize, the frame is now
+    presented with DXGI_PRESENT_DO_NOT_WAIT, this fixes some window system
+    stuttering issues on Win10 configs with recent NVIDIA drivers.
+  - sokol_app.h D3D11/DXGI: the application will no longer appear to freeze for
+    0.5 seconds when the title bar is grabbed with the mouse for movement, but
+    then not moving the mouse.
+  - sokol_app.h D3D11/DXGI: DXGI's automatic windowed/fullscreen switching via
+    Alt-Enter has been disabled, because this switched to 'real' fullscreen mode,
+    while sokol_app.h's fullscreen mode uses a borderless window. Use the
+    programmatic fullscreen/window switching via ```sapp_toggle_fullscreen()```
+    instead.
+  - **BREAKING CHANGE** in sokol_imgui.h: because the applications' DPI scale
+    can now change at any time, the DPI scale value is now communicated to
+    sokol_imgui.h in the ```simgui_new_frame()``` function. This has been
+    changed to accept a pointer to a new ```simgui_frame_desc_t``` struct.
+    With C99, change the simgui_new_frame() call as follows (if also using
+    sokol_app.h):
+    ```c
+    simgui_new_frame(&(simgui_frame_desc_t){
+        .width = sapp_width(),
+        .height = sapp_height(),
+        .delta_time = sapp_frame_duration(),
+        .dpi_scale = sapp_dpi_scale()
+    });
+    ```
+    On C++ this works:
+    ```c++
+    simgui_new_frame({ sapp_width(), sapp_height(), sapp_frame_duration(), sapp_dpi_scale() });
+    ```
+    ...or in C++20:
+    ```c++
+    simgui_new_frame({
+        .width = sapp_width(),
+        .height = sapp_height(),
+        .delta_time = sapp_frame_duration(),
+        .dpi_scale = sapp_dpi_scale()
+    });
+    ```
+  - **KNOWN ISSUE**: the recent change in sokol-audio's WASAPI backend to directly consume
+    float samples doesn't appear to work on some configs (see [#614](https://github.com/floooh/sokol/issues/614)),
+    investigation is underway
+
+- **15-Jan-2022**:
   - A bugfix in the GL backend for uniform arrays using the 'native' uniform block layout.
     The bug was a regression in the recent 'uniform data handling' update. See
     [PR #611](https://github.com/floooh/sokol/pull/611) for details, and this [new sample/test](https://github.com/floooh/sokol-samples/blob/master/glfw/uniformarrays-glfw.c).
     Many thanks to @nmr8acme for the PR!
-  
+
 - **08-Jan-2022**: some enhancements and cleanup to uniform data handling in sokol_gfx.h
   and the sokol-shdc shader compiler:
     - *IMPORTANT*: when updating sokol_gfx.h (and you're using the sokol-shdc shader compiler),
@@ -26,7 +110,7 @@
       This is because the uniform data must still be compatible with
       ```glUniform()``` calls in the GL backends (which have different
       'interior alignment' for arrays).
-    - The sokol-shdc compiler supports the new uniform types and will annotate the 
+    - The sokol-shdc compiler supports the new uniform types and will annotate the
       code-generated sg_shader_desc structs with SG_UNIFORMLAYOUT_STD140,
       and there are new errors to make sure that uniform blocks are compatible
       with all sokol_gfx.h backends.
@@ -39,7 +123,7 @@
     - [documentation of ```sg_uniform_layout```](https://github.com/floooh/sokol/blob/ba64add0b67cac16fc86fb6b64d1da5f67e80c0f/sokol_gfx.h#L1322-L1355)
     - [enhanced sokol-shdc documentation](https://github.com/floooh/sokol-tools/blob/master/docs/sokol-shdc.md#glsl-uniform-blocks-and-c-structs)
     - [a new sample 'uniformtypes-sapp'](https://floooh.github.io/sokol-html5/uniformtypes-sapp.html)
-  
+
   PS: and an unrelated change: the frame latency on Win32+D3D11 has been slightly improved
   via IDXGIDevice1::SetMaximumFrameLatency()
 
@@ -54,7 +138,7 @@
         a number of frames yields a pretty accurate approximation
         of the actual frame duration.
       - On Metal, ```MTLDrawable addPresentedHandler + presentedTime```
-        doesn't appear to function correctly on macOS Monterey and/or M1 Macs, so 
+        doesn't appear to function correctly on macOS Monterey and/or M1 Macs, so
         instead mach_absolute_time() is called at the start of the MTKView
         frame callback.
       - In all other situations, the same timing method is used as
