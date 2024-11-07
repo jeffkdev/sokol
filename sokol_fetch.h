@@ -498,7 +498,7 @@
 
         After the user callback returns, and all file data has been loaded
         (response.finished flag is set) the request has reached its end-of-life
-        and will recycled.
+        and will be recycled.
 
         Otherwise, if there's still data to load (because streaming was
         requested by providing a non-zero request.chunk_size), the request
@@ -610,7 +610,7 @@
     without downloading the entire file first (the Content-Length response
     header only provides the compressed size). Furthermore, for HTTP
     range-requests, the range is given on the compressed data, not the
-    uncompressed data. So if the web server decides to server the data
+    uncompressed data. So if the web server decides to serve the data
     compressed, the content-length and range-request parameters don't
     correspond to the uncompressed data that's arriving in the sokol-fetch
     buffers, and there's no way from JS or WASM to either force uncompressed
@@ -671,7 +671,7 @@
     When a request is sent to a channel via sfetch_send(), a "free lane" will
     be picked and assigned to the request. The request will occupy this lane
     for its entire life time (also while it is paused). If all lanes of a
-    channel are currently occupied, new requests will need to wait until a
+    channel are currently occupied, new requests will wait until a
     lane becomes unoccupied.
 
     Since the number of channels and lanes is known upfront, it is guaranteed
@@ -800,7 +800,7 @@
 
     On platforms with threading support, each channel runs on its own
     thread, but this is mainly an implementation detail to work around
-    the blocking traditional file IO functions, not for performance reasons.
+    the traditional blocking file IO functions, not for performance reasons.
 
 
     MEMORY ALLOCATION OVERRIDE
@@ -1199,6 +1199,11 @@ inline sfetch_handle_t sfetch_send(const sfetch_request_t& request) { return sfe
     #define _SFETCH_PLATFORM_EMSCRIPTEN (0)
     #define _SFETCH_PLATFORM_WINDOWS (0)
     #define _SFETCH_HAS_THREADS (1)
+#endif
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4724) // potential mod by 0
 #endif
 
 // ███████ ████████ ██████  ██    ██  ██████ ████████ ███████
@@ -2806,4 +2811,9 @@ SOKOL_API_IMPL void sfetch_cancel(sfetch_handle_t h) {
         item->user.cancel = true;
     }
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 #endif /* SOKOL_FETCH_IMPL */
