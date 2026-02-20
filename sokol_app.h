@@ -2207,6 +2207,7 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
         #include <GLES3/gl3.h>
     #endif
     #include <emscripten/emscripten.h>
+    #include <emscripten/em_asm.h>
     #include <emscripten/html5.h>
 #elif defined(_SAPP_WIN32)
     #ifdef _MSC_VER
@@ -2619,6 +2620,7 @@ typedef struct {
 typedef struct {
     bool mouse_lock_requested;
     uint16_t mouse_buttons;
+    bool custom_cursor_active;
 } _sapp_emsc_t;
 #endif // _SAPP_EMSCRIPTEN
 
@@ -5184,7 +5186,8 @@ EM_JS(void, sapp_js_init, (const char* c_str_target_selector, const char* c_str_
     if (!Module.sapp_emsc_target) {
         console.warn("sokol_app.h: can't find html5_canvas_selector ", target_selector_str);
     }
-    if (!Module.sapp_emsc_target.requestPointerLock) {
+    const pointerlock_target = (typeof Module !== 'undefined' && Module.canvas) ? Module.canvas : Module.sapp_emsc_target;
+    if (!pointerlock_target || !pointerlock_target.requestPointerLock) {
         console.warn("sokol_app.h: target doesn't support requestPointerLock: ", target_selector_str);
     }
 })
@@ -5205,19 +5208,25 @@ _SOKOL_PRIVATE EM_BOOL _sapp_emsc_pointerlockerror_cb(int emsc_type, const void*
     return true;
 }
 
-EM_JS(void, sapp_js_request_pointerlock, (void), {
-    if (Module.sapp_emsc_target) {
-        if (Module.sapp_emsc_target.requestPointerLock) {
-            Module.sapp_emsc_target.requestPointerLock();
+_SOKOL_PRIVATE void _sapp_emsc_request_pointerlock(void) {
+    MAIN_THREAD_EM_ASM({
+        const sel = UTF8ToString($0);
+        const target =
+            (typeof Module !== 'undefined' && Module.canvas) ? Module.canvas :
+            ((typeof document !== 'undefined' && document.querySelector) ? document.querySelector(sel) : null);
+        if (target && target.requestPointerLock) {
+            target.requestPointerLock();
         }
-    }
-})
+    }, (int)(uintptr_t)_sapp.html5_canvas_selector);
+}
 
-EM_JS(void, sapp_js_exit_pointerlock, (void), {
-    if (document.exitPointerLock) {
-        document.exitPointerLock();
-    }
-})
+_SOKOL_PRIVATE void _sapp_emsc_exit_pointerlock(void) {
+    MAIN_THREAD_EM_ASM({
+        if (typeof document !== 'undefined' && document.exitPointerLock) {
+            document.exitPointerLock();
+        }
+    });
+}
 
 _SOKOL_PRIVATE void _sapp_emsc_lock_mouse(bool lock) {
     if (lock) {
@@ -5227,7 +5236,7 @@ _SOKOL_PRIVATE void _sapp_emsc_lock_mouse(bool lock) {
     else {
         /* NOTE: the _sapp.mouse_locked state will be set in the pointerlockchange callback */
         _sapp.emsc.mouse_lock_requested = false;
-        sapp_js_exit_pointerlock();
+        _sapp_emsc_exit_pointerlock();
     }
 }
 
@@ -5237,8 +5246,68 @@ _SOKOL_PRIVATE void _sapp_emsc_lock_mouse(bool lock) {
 _SOKOL_PRIVATE void _sapp_emsc_update_mouse_lock_state(void) {
     if (_sapp.emsc.mouse_lock_requested) {
         _sapp.emsc.mouse_lock_requested = false;
-        sapp_js_request_pointerlock();
+        _sapp_emsc_request_pointerlock();
     }
+}
+
+_SOKOL_PRIVATE bool _sapp_emsc_make_custom_cursor(const sapp_image_desc* desc) {
+    SOKOL_ASSERT(desc);
+    const int x_hot = (desc->x_hot >= 0 && desc->x_hot < desc->width) ? desc->x_hot : 0;
+    const int y_hot = (desc->y_hot >= 0 && desc->y_hot < desc->height) ? desc->y_hot : 0;
+    return 0 != MAIN_THREAD_EM_ASM_INT({
+        const w = $0 | 0;
+        const h = $1 | 0;
+        const ptr = $2 | 0;
+        const xh = $3 | 0;
+        const yh = $4 | 0;
+        try {
+            if ((typeof document === 'undefined') || !Module || !Module.canvas) {
+                return 0;
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                return 0;
+            }
+            const img_data = ctx.createImageData(w, h);
+            img_data.data.set(HEAPU8.subarray(ptr, ptr + (w * h * 4)));
+            ctx.putImageData(img_data, 0, 0);
+            const url = canvas.toDataURL('image/png');
+            Module._sapp_custom_cursor_css = "url('" + url + "') " + xh + " " + yh + ", auto";
+            return 1;
+        } catch (e) {
+            return 0;
+        }
+    }, desc->width, desc->height, (int)(uintptr_t)desc->pixels.ptr, x_hot, y_hot);
+}
+
+_SOKOL_PRIVATE void _sapp_emsc_discard_custom_cursor(void) {
+    MAIN_THREAD_EM_ASM({
+        if (typeof Module !== 'undefined') {
+            Module._sapp_custom_cursor_css = null;
+        }
+    });
+}
+
+_SOKOL_PRIVATE void _sapp_emsc_apply_custom_cursor(bool shown) {
+    MAIN_THREAD_EM_ASM({
+        if (typeof Module === 'undefined') {
+            return;
+        }
+        const target = Module.canvas || Module.sapp_emsc_target;
+        if (!target || !target.style) {
+            return;
+        }
+        if (($0 | 0) === 0) {
+            target.style.cursor = 'none';
+        } else if (Module._sapp_custom_cursor_css) {
+            target.style.cursor = Module._sapp_custom_cursor_css;
+        } else {
+            target.style.cursor = 'auto';
+        }
+    }, shown ? 1 : 0);
 }
 
 // set mouse cursor type
@@ -5262,12 +5331,18 @@ EM_JS(void, sapp_js_set_cursor, (int cursor_type, int shown), {
             case 10: cursor = "not-allowed"; break; // SAPP_MOUSECURSOR_NOT_ALLOWED
             default: cursor = "auto"; break;
         }
-        Module.sapp_emsc_target.style.cursor = cursor;
+        if (Module.sapp_emsc_target.style) {
+            Module.sapp_emsc_target.style.cursor = cursor;
+        }
     }
 })
 
 _SOKOL_PRIVATE void _sapp_emsc_update_cursor(sapp_mouse_cursor cursor, bool shown) {
     SOKOL_ASSERT((cursor >= 0) && (cursor < _SAPP_MOUSECURSOR_NUM));
+    if (_sapp.emsc.custom_cursor_active) {
+        _sapp_emsc_apply_custom_cursor(shown);
+        return;
+    }
     sapp_js_set_cursor((int)cursor, shown ? 1 : 0);
 }
 
@@ -12151,6 +12226,11 @@ SOKOL_API_IMPL sapp_cursor sapp_make_cursor(const sapp_image_desc* desc) {
     #elif defined(_SAPP_LINUX)
         /* not implemented */
         return (sapp_cursor){.id = 0};
+    #elif defined(_SAPP_EMSCRIPTEN)
+        if (_sapp_image_validate(desc) && _sapp_emsc_make_custom_cursor(desc)) {
+            return (sapp_cursor){ .id = (const void*)(uintptr_t)1 };
+        }
+        return (sapp_cursor){ .id = 0 };
     #endif
 }
 
@@ -12161,6 +12241,9 @@ SOKOL_API_IMPL void sapp_set_cursor(sapp_cursor cursor) {
         _sapp_win32_set_cursor(cursor);
     #elif defined(_SAPP_LINUX)
         /* not implemented */
+    #elif defined(_SAPP_EMSCRIPTEN)
+        _sapp.emsc.custom_cursor_active = (cursor.id != 0);
+        _sapp_emsc_update_cursor(_sapp.mouse.current_cursor, _sapp.mouse.shown);
     #endif
 }
 
@@ -12172,6 +12255,11 @@ SOKOL_API_IMPL void sapp_destroy_cursor(sapp_cursor cursor) {
         _sapp_win32_destroy_cursor(cursor);
     #elif defined(_SAPP_LINUX)
         /* not implemented */
+    #elif defined(_SAPP_EMSCRIPTEN)
+        _SOKOL_UNUSED(cursor);
+        _sapp_emsc_discard_custom_cursor();
+        _sapp.emsc.custom_cursor_active = false;
+        _sapp_emsc_update_cursor(_sapp.mouse.current_cursor, _sapp.mouse.shown);
     #endif
 }
 

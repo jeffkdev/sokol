@@ -775,6 +775,7 @@ inline void saudio_setup(const saudio_desc& desc) { return saudio_setup(&desc); 
 #elif defined(__EMSCRIPTEN__)
     #define _SAUDIO_NOTHREADS (1)
     #include <emscripten/emscripten.h>
+    #include <emscripten/em_asm.h>
 #endif
 
 #define _saudio_def(val, def) (((val) == 0) ? (def) : (val))
@@ -1753,100 +1754,103 @@ EMSCRIPTEN_KEEPALIVE int _saudio_emsc_pull(int num_frames) {
 #endif
 
 /* setup the WebAudio context and attach a ScriptProcessorNode */
-EM_JS(int, saudio_js_init, (int sample_rate, int num_channels, int buffer_size), {
-    Module._saudio_context = null;
-    Module._saudio_node = null;
-    if (typeof AudioContext !== 'undefined') {
-        Module._saudio_context = new AudioContext({
-            sampleRate: sample_rate,
-            latencyHint: 'interactive',
-        });
-    }
-    else {
-        Module._saudio_context = null;
-        console.log('sokol_audio.h: no WebAudio support');
-    }
-    if (Module._saudio_context) {
-        console.log('sokol_audio.h: sample rate ', Module._saudio_context.sampleRate);
-        Module._saudio_node = Module._saudio_context.createScriptProcessor(buffer_size, 0, num_channels);
-        Module._saudio_node.onaudioprocess = (event) => {
-            const num_frames = event.outputBuffer.length;
-            const ptr = __saudio_emsc_pull(num_frames);
-            if (ptr) {
-                const num_channels = event.outputBuffer.numberOfChannels;
-                for (let chn = 0; chn < num_channels; chn++) {
-                    const chan = event.outputBuffer.getChannelData(chn);
-                    for (let i = 0; i < num_frames; i++) {
-                        chan[i] = HEAPF32[(ptr>>2) + ((num_channels*i)+chn)]
-                    }
-                }
-            }
-        };
-        Module._saudio_node.connect(Module._saudio_context.destination);
-
-        // in some browsers, WebAudio needs to be activated on a user action
-        const resume_webaudio = () => {
-            if (Module._saudio_context) {
-                if (Module._saudio_context.state === 'suspended') {
-                    Module._saudio_context.resume();
-                }
-            }
-        };
-        document.addEventListener('click', resume_webaudio, {once:true});
-        document.addEventListener('touchend', resume_webaudio, {once:true});
-        document.addEventListener('keydown', resume_webaudio, {once:true});
-        return 1;
-    }
-    else {
-        return 0;
-    }
-})
-
-/* shutdown the WebAudioContext and ScriptProcessorNode */
-EM_JS(void, saudio_js_shutdown, (void), {
-    \x2F\x2A\x2A @suppress {missingProperties} \x2A\x2F
-    const ctx = Module._saudio_context;
-    if (ctx !== null) {
-        if (Module._saudio_node) {
-            Module._saudio_node.disconnect();
-        }
-        ctx.close();
+_SOKOL_PRIVATE int saudio_js_init(int sample_rate, int num_channels, int buffer_size) {
+    return MAIN_THREAD_EM_ASM_INT({
         Module._saudio_context = null;
         Module._saudio_node = null;
-    }
-})
-
-/* get the actual sample rate back from the WebAudio context */
-EM_JS(int, saudio_js_sample_rate, (void), {
-    if (Module._saudio_context) {
-        return Module._saudio_context.sampleRate;
-    }
-    else {
-        return 0;
-    }
-})
-
-/* get the actual buffer size in number of frames */
-EM_JS(int, saudio_js_buffer_frames, (void), {
-    if (Module._saudio_node) {
-        return Module._saudio_node.bufferSize;
-    }
-    else {
-        return 0;
-    }
-})
-
-/* return 1 if the WebAudio context is currently suspended, else 0 */
-EM_JS(int, saudio_js_suspended, (void), {
-    if (Module._saudio_context) {
-        if (Module._saudio_context.state === 'suspended') {
-            return 1;
+        const AudioContextCtor =
+            (typeof globalThis !== 'undefined' && (globalThis.AudioContext || globalThis.webkitAudioContext))
+            || (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
+            || null;
+        if (AudioContextCtor) {
+            Module._saudio_context = new AudioContextCtor({
+                sampleRate: $0,
+                latencyHint: 'interactive',
+            });
         }
         else {
-            return 0;
+            Module._saudio_context = null;
+            console.log('sokol_audio.h: no WebAudio support');
         }
-    }
-})
+        if (Module._saudio_context) {
+            console.log('sokol_audio.h: sample rate ', Module._saudio_context.sampleRate);
+            Module._saudio_node = Module._saudio_context.createScriptProcessor($2, 0, $1);
+            Module._saudio_node.onaudioprocess = (event) => {
+                const num_frames = event.outputBuffer.length;
+                const ptr = __saudio_emsc_pull(num_frames);
+                if (ptr) {
+                    const channels = event.outputBuffer.numberOfChannels;
+                    for (let chn = 0; chn < channels; chn++) {
+                        const chan = event.outputBuffer.getChannelData(chn);
+                        for (let i = 0; i < num_frames; i++) {
+                            chan[i] = HEAPF32[(ptr>>2) + ((channels*i)+chn)];
+                        }
+                    }
+                }
+            };
+            Module._saudio_node.connect(Module._saudio_context.destination);
+
+            // in some browsers, WebAudio needs to be activated on a user action
+            const resume_webaudio = () => {
+                if (Module._saudio_context) {
+                    if (Module._saudio_context.state === 'suspended') {
+                        Module._saudio_context.resume();
+                    }
+                }
+            };
+            document.addEventListener('click', resume_webaudio, {once:true});
+            document.addEventListener('touchend', resume_webaudio, {once:true});
+            document.addEventListener('keydown', resume_webaudio, {once:true});
+            return 1;
+        }
+        return 0;
+    }, sample_rate, num_channels, buffer_size);
+}
+
+/* shutdown the WebAudioContext and ScriptProcessorNode */
+_SOKOL_PRIVATE void saudio_js_shutdown(void) {
+    MAIN_THREAD_EM_ASM({
+        const ctx = Module._saudio_context;
+        if (ctx !== null) {
+            if (Module._saudio_node) {
+                Module._saudio_node.disconnect();
+            }
+            ctx.close();
+            Module._saudio_context = null;
+            Module._saudio_node = null;
+        }
+    });
+}
+
+/* get the actual sample rate back from the WebAudio context */
+_SOKOL_PRIVATE int saudio_js_sample_rate(void) {
+    return MAIN_THREAD_EM_ASM_INT({
+        if (Module._saudio_context) {
+            return Module._saudio_context.sampleRate | 0;
+        }
+        return 0;
+    });
+}
+
+/* get the actual buffer size in number of frames */
+_SOKOL_PRIVATE int saudio_js_buffer_frames(void) {
+    return MAIN_THREAD_EM_ASM_INT({
+        if (Module._saudio_node) {
+            return Module._saudio_node.bufferSize | 0;
+        }
+        return 0;
+    });
+}
+
+/* return 1 if the WebAudio context is currently suspended, else 0 */
+_SOKOL_PRIVATE int saudio_js_suspended(void) {
+    return MAIN_THREAD_EM_ASM_INT({
+        if (Module._saudio_context && (Module._saudio_context.state === 'suspended')) {
+            return 1;
+        }
+        return 0;
+    });
+}
 
 _SOKOL_PRIVATE bool _saudio_webaudio_backend_init(void) {
     if (saudio_js_init(_saudio.sample_rate, _saudio.num_channels, _saudio.buffer_frames)) {
